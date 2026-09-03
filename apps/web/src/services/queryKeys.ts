@@ -19,6 +19,9 @@ export const qk = {
   subtaskAutomation: (projectKey: string) => ['subtaskAutomation', projectKey] as const,
   // The project's repository integration settings (the Repositories settings section).
   gitSettings: (projectKey: string) => ['gitSettings', projectKey] as const,
+  gitConnections: (projectKey: string) => ['gitConnections', projectKey] as const,
+  gitAvailableRepositories: (projectKey: string, connectionId: number, search: string) =>
+    ['gitConnections', projectKey, connectionId, 'repositories', search] as const,
   // A project's notification delivery settings (the Notifications section).
   notificationSettings: (projectKey: string) => ['notificationSettings', projectKey] as const,
   notificationPreferences: (projectKey: string) => ['notificationPreferences', projectKey] as const,
@@ -63,9 +66,16 @@ export const qk = {
   agentScheduleRuns: (projectKey: string, scheduleId: number) =>
     ['agentSchedules', projectKey, scheduleId, 'runs'] as const,
   // The caller's chat threads with one agent (the AI Chat history rail) and the
-  // transcript of one thread (restored when a thread is opened).
-  agentThreads: (projectKey: string, agentId: number) =>
-    ['aiAgents', projectKey, agentId, 'threads'] as const,
+  // transcript of one thread (restored when a thread is opened). A search is a list of
+  // its own, so the unsearched list stays cached while one is typed.
+  agentThreadLists: (projectKey: string, agentId: number) =>
+    ['aiAgents', projectKey, agentId, 'threadList'] as const,
+  agentThreads: (projectKey: string, agentId: number, q = '') =>
+    ['aiAgents', projectKey, agentId, 'threadList', q] as const,
+  // The conversations starred with one agent: the group on top of the history, and what
+  // the star in the tabs bar reads its state from.
+  agentFavoriteThreads: (projectKey: string, agentId: number) =>
+    ['aiAgents', projectKey, agentId, 'favoriteThreads'] as const,
   agentThreadMessages: (projectKey: string, agentId: number, threadId: string) =>
     ['aiAgents', projectKey, agentId, 'threads', threadId] as const,
   // Stored integration credentials, the integration catalog, and an LLM provider's
@@ -150,10 +160,13 @@ export const qk = {
   // start page). Read app-wide, not just on the preferences page.
   accountPreferences: ['accountPreferences'] as const,
   // Instance administration (god mode): the sign-in policy, the mail provider, the
-  // Google credentials and the Telegram bot. Not scoped to a project.
+  // sign-in providers, SCIM provisioning and the Telegram bot. Not scoped to a project.
   instanceAuthSettings: ['instanceAuthSettings'] as const,
   instanceEmailSettings: ['instanceEmailSettings'] as const,
   instanceGoogleSettings: ['instanceGoogleSettings'] as const,
+  instanceOidcSettings: ['instanceOidcSettings'] as const,
+  instanceScimSettings: ['instanceScimSettings'] as const,
+  instanceScimGroups: ['instanceScimGroups'] as const,
   instanceTelegramSettings: ['instanceTelegramSettings'] as const,
   instanceProjectDefaults: ['instanceProjectDefaults'] as const,
   instanceStorageSettings: ['instanceStorageSettings'] as const,

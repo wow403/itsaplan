@@ -221,11 +221,17 @@ export const projectMember = pgTable(
     // members page and given to agents so they can pick who to tag on an unassigned
     // issue. Empty string when unset.
     description: text('description').notNull().default(''),
+    // How this membership came about. 'invite' is a person accepting an invite;
+    // 'scim' is a row the SCIM group reconciliation created and therefore owns —
+    // it only ever updates or removes its own rows, so a sync never undoes a
+    // membership someone set up by hand.
+    source: text('source').notNull().default('invite'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.projectId, t.userId] }),
     check('project_member_role_check', sql`${t.role} IN ('owner', 'member')`),
+    check('project_member_source_check', sql`${t.source} IN ('invite', 'scim')`),
     index('project_member_user_idx').on(t.userId),
   ],
 );
@@ -633,6 +639,24 @@ export const agentChatUsage = pgTable(
   (t) => [index('agent_chat_usage_agent_idx').on(t.agentId)],
 );
 
+// The conversations a member has starred, so they stay within reach in the chat
+// history. Like agent_chat_usage the row carries no foreign key to the thread: an
+// internal agent's thread lives in Mastra's own tables. Deleting a thread deletes its
+// row; a row left behind is harmless, since the history is built from the threads.
+export const agentChatFavorite = pgTable(
+  'agent_chat_favorite',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    agentId: integer('agent_id')
+      .notNull()
+      .references(() => aiAgent.id, { onDelete: 'cascade' }),
+    threadId: text('thread_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.threadId] })],
+);
+
 // Stored credentials for a project's integrations. One store for every secret: the
 // API keys of LLM providers (kind 'llm', addressed by an internal agent's model) and
 // the credentials of tool integrations (kind 'tool', bound to configured tools).
@@ -661,6 +685,55 @@ export const integrationCredential = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('integration_credential_project_idx').on(t.projectId)],
+);
+
+export const gitProviderConnection = pgTable(
+  'git_provider_connection',
+  {
+    id: serial('id').primaryKey(),
+    projectId: integer('project_id')
+      .notNull()
+      .references(() => project.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    baseUrl: text('base_url').notNull(),
+    accountLogin: text('account_login').notNull(),
+    ciphertext: text('ciphertext').notNull(),
+    iv: text('iv').notNull(),
+    authTag: text('auth_tag').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('git_provider_connection_project_provider_url_account_unique').on(
+      t.projectId,
+      t.provider,
+      t.baseUrl,
+      t.accountLogin,
+    ),
+    index('git_provider_connection_project_idx').on(t.projectId),
+  ],
+);
+
+export const gitManagedRepository = pgTable(
+  'git_managed_repository',
+  {
+    id: serial('id').primaryKey(),
+    connectionId: integer('connection_id')
+      .notNull()
+      .references(() => gitProviderConnection.id, { onDelete: 'cascade' }),
+    externalId: text('external_id').notNull(),
+    fullName: text('full_name').notNull(),
+    webUrl: text('web_url').notNull(),
+    webhookExternalId: text('webhook_external_id').notNull(),
+    status: text('status').notNull().default('connected'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('git_managed_repository_connection_external_unique').on(t.connectionId, t.externalId),
+    index('git_managed_repository_connection_idx').on(t.connectionId, t.fullName),
+  ],
 );
 
 // Per-project notification provider credentials: the outbound channels the project
@@ -1098,6 +1171,9 @@ export const issue = pgTable(
     index('issue_project_active_idx')
       .on(t.projectId, t.columnId)
       .where(sql`${t.archivedAt} IS NULL`),
+    // Backs the import duplicate check: the titles a project already holds,
+    // archived ones included, normalised the way titleKey compares them.
+    index('issue_project_title_idx').on(t.projectId, sql`lower(btrim(${t.title}))`),
     // Backs reading a parent's subtasks, on the issue page and on every write that
     // has to know whether an issue has any.
     index('issue_parent_idx')
@@ -1307,6 +1383,58 @@ export const issueAttachment = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('issue_attachment_issue_idx').on(t.issueId)],
+);
+
+export const issueDevelopmentLink = pgTable(
+  'issue_development_link',
+  {
+    id: serial('id').primaryKey(),
+    issueId: integer('issue_id')
+      .notNull()
+      .references(() => issue.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    repository: text('repository').notNull(),
+    kind: text('kind').notNull().default('pull_request'),
+    externalKey: text('external_key').notNull(),
+    number: integer('number'),
+    title: text('title').notNull(),
+    url: text('url'),
+    state: text('state').notNull(),
+    draft: boolean('draft').notNull().default(false),
+    sourceBranch: text('source_branch'),
+    targetBranch: text('target_branch').notNull(),
+    headSha: text('head_sha'),
+    pipelineStatus: text('pipeline_status'),
+    pipelineUrl: text('pipeline_url'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique().on(t.issueId, t.provider, t.repository, t.externalKey),
+    index('issue_development_link_issue_idx').on(t.issueId, t.updatedAt.desc()),
+    index('issue_development_link_pr_idx').on(t.provider, t.repository, t.number),
+    index('issue_development_link_sha_idx').on(t.provider, t.repository, t.headSha),
+  ],
+);
+
+export const issueDevelopmentCheck = pgTable(
+  'issue_development_check',
+  {
+    id: serial('id').primaryKey(),
+    developmentLinkId: integer('development_link_id')
+      .notNull()
+      .references(() => issueDevelopmentLink.id, { onDelete: 'cascade' }),
+    externalId: text('external_id').notNull(),
+    appId: text('app_id').notNull(),
+    name: text('name').notNull(),
+    status: text('status').notNull(),
+    url: text('url'),
+    headSha: text('head_sha').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique().on(t.developmentLinkId, t.appId, t.name),
+    index('issue_development_check_link_sha_idx').on(t.developmentLinkId, t.headSha),
+  ],
 );
 
 // A file uploaded in an agent chat. Bytes live in the S3-compatible object store;

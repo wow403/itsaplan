@@ -547,11 +547,16 @@ export type AgentRunEvent =
 // `contextTokens` is the size of the conversation's context after its last completed
 // answer: absent while no answer has completed, null where the agent reports no counts
 // that can be read as one.
+// `favorite` is the star the caller put on the conversation. `snippet` and `match` come
+// back from a search: the text around the hit, and where it was found.
 export interface AiChatThread {
   id: string;
   title: string | null;
   cliSessionId: string | null;
   contextTokens?: number | null;
+  favorite: boolean;
+  snippet?: string;
+  match?: 'title' | 'user' | 'assistant';
   createdAt: string;
   updatedAt: string;
 }
@@ -688,7 +693,11 @@ export interface IssueImport {
   mapping: Record<string, string> | null;
   errorText: string | null;
   createdAt: string;
-  preview?: { headers: string[]; rows: string[][]; totalRows: number };
+  preview?: {
+    columns: { field: string; header: string }[];
+    rows: { cells: string[]; skip: string | null }[];
+    totalRows: number;
+  };
 }
 
 export interface ImportConfirmResult {
@@ -970,6 +979,7 @@ export interface GitSettings {
   secret: string | null;
   onMergeColumnId: number | null;
   onOpenColumnId: number | null;
+  linkbackComments: boolean;
   repositories: GitRepository[];
 }
 
@@ -979,6 +989,40 @@ export interface GitRepository {
   repo: string;
   provider: string;
   lastEventAt: string;
+}
+
+export type GitConnectionProvider = 'github' | 'gitlab' | 'gitea' | 'forgejo' | 'bitbucket';
+
+export interface GitManagedRepository {
+  id: number;
+  externalId: string;
+  fullName: string;
+  webUrl: string;
+  status: 'connected' | 'error';
+  lastError: string | null;
+}
+
+export interface GitProviderConnection {
+  id: number;
+  provider: GitConnectionProvider;
+  baseUrl: string;
+  accountLogin: string;
+  repositories: GitManagedRepository[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AvailableGitRepository {
+  externalId: string;
+  fullName: string;
+  webUrl: string;
+  private: boolean;
+  managedRepositoryId: number | null;
+}
+
+export interface AvailableGitRepositoryPage {
+  repositories: AvailableGitRepository[];
+  nextPage: number | null;
 }
 
 // Which optional sections a project shows. All on by default; turning one off
@@ -1101,13 +1145,18 @@ export interface InstanceAuthSettings {
   registration: RegistrationMode;
   requireEmailVerification: boolean;
   magicLink: boolean;
+  emailPassword: boolean;
   hasEmailProvider: boolean;
+  // Whether Google or the OIDC provider can run. Password sign-in may only be turned
+  // off while one of them can.
+  hasSsoProvider: boolean;
 }
 
 export interface InstanceAuthSettingsPatch {
   registration?: RegistrationMode;
   requireEmailVerification?: boolean;
   magicLink?: boolean;
+  emailPassword?: boolean;
 }
 
 // The instance mail provider used for authentication email (password reset, address
@@ -1144,6 +1193,10 @@ export interface InstanceEmailSettingsPatch {
   allowProjects?: boolean;
 }
 
+export interface InstanceEmailTestResult {
+  recipient: string;
+}
+
 // The Google OAuth credentials used for social sign-in. The client secret is never
 // returned, only a `hasClientSecret` flag. redirectUri is derived from the API origin
 // and has to be registered in the Google Cloud console.
@@ -1158,6 +1211,57 @@ export interface InstanceGoogleSettingsPatch {
   enabled?: boolean;
   clientId?: string;
   clientSecret?: string;
+}
+
+// The instance's generic OIDC/OAuth2 provider. The client secret is never returned,
+// only a `hasClientSecret` flag. redirectUri is derived from the API origin and has
+// to be registered with the identity provider.
+export interface InstanceOidcSettings {
+  enabled: boolean;
+  label: string;
+  discoveryUrl: string;
+  clientId: string;
+  hasClientSecret: boolean;
+  scopes: string[];
+  pkce: boolean;
+  redirectUri: string;
+}
+
+export interface InstanceOidcSettingsPatch {
+  enabled?: boolean;
+  label?: string;
+  discoveryUrl?: string;
+  clientId?: string;
+  clientSecret?: string;
+  scopes?: string[];
+  pkce?: boolean;
+}
+
+// SCIM provisioning. The token is never returned, only its prefix; a new one is
+// generated with createInstanceScimToken and shown once.
+export interface InstanceScimSettings {
+  enabled: boolean;
+  hasToken: boolean;
+  tokenPrefix: string;
+  baseUrl: string;
+}
+
+// What a provisioned group grants: membership in a project, at a role. The group and
+// its members come from the identity provider; the mappings are set here.
+export interface InstanceScimGroupMapping {
+  projectId: number;
+  projectKey: string;
+  projectName: string;
+  role: 'owner' | 'member';
+  roleId: number | null;
+}
+
+export interface InstanceScimGroup {
+  id: string;
+  displayName: string;
+  externalId: string | null;
+  memberCount: number;
+  mappings: InstanceScimGroupMapping[];
 }
 
 // The instance Telegram bot: the one bot users link their accounts through, and the
@@ -1259,6 +1363,9 @@ export interface InstanceProjectMember {
 
 export interface InstanceProjectDetail extends InstanceProject {
   members: InstanceProjectMember[];
+  // The custom roles a member of this project can be put on, for the SCIM group
+  // mapping form.
+  roles: { id: number; name: string; isDefault: boolean }[];
 }
 
 export interface InstanceProjectPage {
@@ -1274,7 +1381,14 @@ export interface PublicAuthConfig {
   magicLink: boolean;
   requireEmailVerification: boolean;
   emailEnabled: boolean;
+  // Whether the email/password form is offered at all. False only on an instance
+  // that has a working single sign-on provider.
+  emailPassword: boolean;
   google: boolean;
+  oidc: boolean;
+  // The sign-in button text the operator gave their identity provider. Empty when
+  // OIDC is not offered, or when they left it blank.
+  oidcLabel: string;
 }
 
 // The session member's own notification preferences for a project: which issue
@@ -1924,6 +2038,38 @@ export interface IssueDetail extends Issue {
   fields: IssueFieldValue[];
 }
 
+export type GitProvider = 'github' | 'gitlab' | 'gitea' | 'forgejo' | 'bitbucket';
+export type PullRequestState = 'open' | 'merged' | 'closed';
+export type PipelineStatus = 'pending' | 'running' | 'success' | 'failed' | 'canceled' | 'skipped';
+
+export interface DevelopmentCheck {
+  id: number;
+  name: string;
+  status: PipelineStatus;
+  url: string | null;
+  updatedAt: string;
+}
+
+export interface DevelopmentLink {
+  id: number;
+  provider: GitProvider;
+  repository: string;
+  kind: 'pull_request' | 'branch';
+  number: number | null;
+  title: string;
+  url: string | null;
+  state: PullRequestState;
+  draft: boolean;
+  sourceBranch: string | null;
+  targetBranch: string;
+  headSha: string | null;
+  pipelineStatus: PipelineStatus | null;
+  pipelineUrl: string | null;
+  checkStatus: PipelineStatus | null;
+  checks: DevelopmentCheck[];
+  updatedAt: string;
+}
+
 // A relation between two issues (mirrors apps/api modules/issues/links.ts). 'blocks' and
 // 'duplicates' are directional and read differently on each end, which direction
 // selects: 'outward' is the side that blocks/duplicates, 'inward' the side that is
@@ -2036,6 +2182,7 @@ export interface IssueRelations extends IssueDetail {
 export interface IssueWithWatchers extends IssueRelations {
   watchers: IssueWatcher[];
   checklists: Checklist[];
+  development: DevelopmentLink[];
 }
 
 // Public read-only share bundles, returned by the /share/* routes with no session.
@@ -2383,6 +2530,9 @@ export interface MemberRow {
   // True when this member is an AI agent's bot user. Its role and access are managed
   // on the AI Agents screen, so this list does not let you reassign or revoke it.
   isAgent: boolean;
+  // 'scim' when a provisioned group granted this membership. The sync rewrites such
+  // a row on every run, so the role and remove actions are refused for it.
+  source: 'invite' | 'scim';
   createdAt: string;
 }
 
@@ -2405,6 +2555,14 @@ export interface InviteRow {
   respondedAt: string | null;
   invitedByName: string | null;
   invitedByEmail: string | null;
+}
+
+export interface InviteCreateResult extends InviteRow {
+  emailQueued: boolean;
+}
+
+export interface InviteEmailResult {
+  emailQueued: boolean;
 }
 
 // An invite as shown to the invitee opening the link: enough project context to
@@ -2680,6 +2838,8 @@ export const api = {
     request<IssueWithWatchers>(`/projects/${projectKey}/issues/${seq}`),
   updateIssue: (id: number, patch: IssuePatch) =>
     request<Issue>(`/issues/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  removeIssueDevelopmentLink: (issueId: number, linkId: number) =>
+    request<void>(`/issues/${issueId}/development/${linkId}`, { method: 'DELETE' }),
   // An issue that has subtasks needs a disposition saying what happens to them;
   // without one the server rejects the delete with a 409.
   deleteIssue: (id: number, subtasks?: SubtaskDisposition) =>
@@ -3094,9 +3254,29 @@ export const api = {
       `/projects/${projectKey}/agent-schedules/${scheduleId}/runs${runId != null ? `/${runId}` : ''}/cancel`,
       { method: 'POST' },
     ),
-  // One page of the caller's own chat threads with an agent, newest first.
-  listAiAgentThreads: (projectKey: string, agentId: number, page: number) =>
-    request<AiChatThreadPage>(`/projects/${projectKey}/ai-agents/${agentId}/threads?page=${page}`),
+  // One page of the caller's own chat threads with an agent, newest first. `q` searches
+  // them by title and message text instead, over every page.
+  listAiAgentThreads: (projectKey: string, agentId: number, page: number, q = '') =>
+    request<AiChatThreadPage>(
+      `/projects/${projectKey}/ai-agents/${agentId}/threads?page=${page}` +
+        (q ? `&q=${encodeURIComponent(q)}` : ''),
+    ),
+  // The conversations the caller starred with an agent, newest first, in one go.
+  listAiAgentFavoriteThreads: (projectKey: string, agentId: number) =>
+    request<AiChatThreadPage>(
+      `/projects/${projectKey}/ai-agents/${agentId}/threads?favorites=true`,
+    ),
+  // Stars one of the caller's conversations, or takes the star off it.
+  setAiAgentThreadFavorite: (
+    projectKey: string,
+    agentId: number,
+    threadId: string,
+    favorite: boolean,
+  ) =>
+    request<void>(
+      `/projects/${projectKey}/ai-agents/${agentId}/threads/${encodeURIComponent(threadId)}/favorite`,
+      { method: favorite ? 'PUT' : 'DELETE' },
+    ),
   // The transcript of one chat thread, to restore the conversation.
   getAiAgentThreadMessages: (projectKey: string, agentId: number, threadId: string, page: number) =>
     request<AiChatMessagePage>(
@@ -3246,15 +3426,19 @@ export const api = {
   deleteRole: (projectKey: string, roleId: number) =>
     request<void>(`/projects/${projectKey}/roles/${roleId}`, { method: 'DELETE' }),
 
-  // Invites — owner side: create, list, and revoke a project's invite links.
+  // Invites — owner side: create, list, email, and revoke a project's invite links.
   listInvites: (projectKey: string) => request<InviteRow[]>(`/projects/${projectKey}/invites`),
   createInvite: (
     projectKey: string,
     input: { email: string; role: MemberRole; roleId?: number | null },
   ) =>
-    request<InviteRow>(`/projects/${projectKey}/invites`, {
+    request<InviteCreateResult>(`/projects/${projectKey}/invites`, {
       method: 'POST',
       body: JSON.stringify(input),
+    }),
+  sendInviteEmail: (projectKey: string, inviteId: number) =>
+    request<InviteEmailResult>(`/projects/${projectKey}/invites/${inviteId}/email`, {
+      method: 'POST',
     }),
   deleteInvite: (projectKey: string, inviteId: number) =>
     request<void>(`/projects/${projectKey}/invites/${inviteId}`, { method: 'DELETE' }),
@@ -3344,7 +3528,12 @@ export const api = {
     request<GitSettings>(`/projects/${projectKey}/settings/git`),
   updateGitSettings: (
     projectKey: string,
-    patch: { enabled?: boolean; onMergeColumnId?: number | null; onOpenColumnId?: number | null },
+    patch: {
+      enabled?: boolean;
+      onMergeColumnId?: number | null;
+      onOpenColumnId?: number | null;
+      linkbackComments?: boolean;
+    },
   ) =>
     request<GitSettings>(`/projects/${projectKey}/settings/git`, {
       method: 'PATCH',
@@ -3354,6 +3543,42 @@ export const api = {
     request<GitSettings>(`/projects/${projectKey}/settings/git/secret`, {
       method: 'POST',
     }),
+  listGitProviderConnections: (projectKey: string) =>
+    request<GitProviderConnection[]>(`/projects/${projectKey}/settings/git/connections`),
+  connectGitProvider: (
+    projectKey: string,
+    input: { provider: GitConnectionProvider; baseUrl?: string; token: string },
+  ) =>
+    request<GitProviderConnection>(`/projects/${projectKey}/settings/git/connections`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  disconnectGitProvider: (projectKey: string, connectionId: number) =>
+    request<void>(`/projects/${projectKey}/settings/git/connections/${connectionId}`, {
+      method: 'DELETE',
+    }),
+  listAvailableGitRepositories: (
+    projectKey: string,
+    connectionId: number,
+    params: { page?: number; search?: string },
+  ) => {
+    const query = new URLSearchParams();
+    if (params.page) query.set('page', String(params.page));
+    if (params.search) query.set('search', params.search);
+    return request<AvailableGitRepositoryPage>(
+      `/projects/${projectKey}/settings/git/connections/${connectionId}/repositories?${query}`,
+    );
+  },
+  connectGitRepositories: (projectKey: string, connectionId: number, externalIds: string[]) =>
+    request<GitProviderConnection>(
+      `/projects/${projectKey}/settings/git/connections/${connectionId}/repositories`,
+      { method: 'POST', body: JSON.stringify({ externalIds }) },
+    ),
+  disconnectGitRepository: (projectKey: string, connectionId: number, repositoryId: number) =>
+    request<void>(
+      `/projects/${projectKey}/settings/git/connections/${connectionId}/repositories/${repositoryId}`,
+      { method: 'DELETE' },
+    ),
 
   // Notification provider credentials (danger_zone: read to view, edit to change).
   getNotificationSettings: (projectKey: string) =>
@@ -3450,6 +3675,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(patch),
     }),
+  testInstanceEmailSettings: (patch: InstanceEmailSettingsPatch) =>
+    request<InstanceEmailTestResult>('/god/email-settings/test', {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    }),
   getInstanceTelegramSettings: () => request<InstanceTelegramSettings>('/god/telegram-settings'),
   updateInstanceTelegramSettings: (patch: InstanceTelegramSettingsPatch) =>
     request<InstanceTelegramSettings>('/god/telegram-settings', {
@@ -3499,6 +3729,33 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(patch),
     }),
+  getInstanceOidcSettings: () => request<InstanceOidcSettings>('/god/oidc-settings'),
+  updateInstanceOidcSettings: (patch: InstanceOidcSettingsPatch) =>
+    request<InstanceOidcSettings>('/god/oidc-settings', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+
+  getInstanceScimSettings: () => request<InstanceScimSettings>('/god/scim-settings'),
+  updateInstanceScimSettings: (patch: { enabled: boolean }) =>
+    request<InstanceScimSettings>('/god/scim-settings', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  // Returns the new token in the clear. It is shown once and cannot be read back.
+  createInstanceScimToken: () =>
+    request<{ token: string }>('/god/scim-settings/token', { method: 'POST' }),
+
+  listInstanceScimGroups: () => request<InstanceScimGroup[]>('/god/scim-groups'),
+  setInstanceScimGroupMappings: (
+    groupId: string,
+    mappings: { projectId: number; role: 'owner' | 'member'; roleId: number | null }[],
+  ) =>
+    request<InstanceScimGroup>(`/god/scim-groups/${groupId}/mappings`, {
+      method: 'PUT',
+      body: JSON.stringify({ mappings }),
+    }),
+
   // The instance user directory: one page of accounts, and one account with the
   // projects it can reach. Search, the kind filter and paging all run on the server.
   listInstanceUsers: (params: {
